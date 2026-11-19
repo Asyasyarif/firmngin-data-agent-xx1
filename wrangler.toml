@@ -1,0 +1,103 @@
+name = "firmngin-data-agent-xx1"
+main = "src/index.ts"
+compatibility_date = "2026-11-15"
+# `agents` (Lifecycle + Scheduler) requires nodejs_compat.
+compatibility_flags = ["nodejs_compat", "enable_request_signal"]
+
+# Public workers.dev and preview hostnames stay off. Realtime ingress requires
+# an explicitly provisioned custom route ending in /v1/wake; that route is
+# HMAC-authenticated and the former unauthenticated POST / drain is closed.
+workers_dev = false
+preview_urls = false
+
+# Runs once a minute as recovery and heartbeat. When a wake URL
+# (WORKER_BASE_URL) is registered, Firmngin dispatches queued turns
+# immediately; cron long-poll catches a missed or unavailable callback
+# without becoming a second scheduler. Legacy scheduled runs remain hour-bucket
+# idempotent.
+[triggers]
+crons = ["* * * * *"]
+
+# One named SQLite Durable Object per agent (plan v1.2 §2.1, §9.2). The object
+# owns the recurring schedules (Cloudflare Agents Scheduler) and the tiny
+# lifecycle state; chat long-poll and model inference stay on the Worker.
+[[durable_objects.bindings]]
+name = "WORKSPACE_AGENT"
+class_name = "WorkspaceAgent"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WorkspaceAgent"]
+
+[vars]
+# Production API base URL. This is the only backend committed to the repo.
+#
+# Local/development deployments override it at runtime through either:
+#   ENVIRONMENT    = "development"   (var, set on the dev deployment)
+#   URL_BACKEND_DEV = <your tunnel>  (var, set on the dev deployment only)
+# Nothing about a private tunnel belongs in this file.
+URL_BACKEND = "https://8080.asyarif.my.id"
+
+# The chat endpoint + key for agents whose provider is OpenRouter (the
+# dashboard default) or OpenAI Compatible. For "Claude Compatible" agents the
+# same two vars are reused, but MODEL_BASE_URL must point at the Anthropic API
+# root (https://api.anthropic.com) and MODEL_API_KEY at an Anthropic key: the
+# Worker detects the provider from the agent and speaks the Messages API.
+# The model id from each agent's config is passed through unchanged.
+MODEL_BASE_URL = "https://openrouter.ai/api/v1"
+
+# Output token cap required by the Anthropic Messages API. Raise it if your
+# agents produce long answers (Claude 3.5+ accepts more).
+MODEL_MAX_TOKENS = "8192"
+
+# Safety bound for tool-calling steps inside one turn.
+MAX_STEPS = "8"
+
+# Subrequests per invocation this deployment may spend. The runtime assumes the
+# Workers Free floor (50) when unset, so a paid-plan raise must be mirrored here:
+#
+# [limits]
+# subrequests = 1000
+#
+# [vars]
+# SUBREQUEST_BUDGET = "1000"
+#
+# The budget is per invocation: a cron tick and each streaming /v1/wake request
+# each get their own counter, and every run reserves its own terminal report
+# before it is claimed.
+#
+# Never set SUBREQUEST_BUDGET above the platform value, and do not read it as a
+# guarantee: redirect hops count as extra subrequests, so the runtime keeps a
+# couple of slots unspent and stops on the first platform rejection. If the var
+# mirrors a higher limit than the deployment really has, the terminal run report
+# is still what gets lost.
+
+# Per-agent Durable Object sync (Lifecycle + Scheduler). Leave "false" until the
+# backend exposes GET /agent-runtime/worker/agents/:id/schedules; while false the
+# once-a-minute cron hour-bucket remains the only scheduler (never both).
+AGENT_DO_SYNC = "false"
+
+# Secrets (set in the deploy wizard or `wrangler secret put`):
+#   WORKER_TOKEN  - the workspace Worker token (fng_aow_...) shown once in the
+#                   Firmngin dashboard. One deployment serves every agent. The
+#                   realtime wake signing key is derived from this token, so
+#                   there is no third secret to invent.
+#   MODEL_API_KEY - your model provider key; never sent to Firmngin.
+#   WAKE_SECRET   - optional legacy override: set it only to keep an explicit
+#                   key an existing deployment already registered with
+#                   Firmngin. Unset means the derived key is used.
+# Realtime var, set once after provisioning the HTTPS custom route. The inbound
+# wake route is fail-closed until a valid wake URL is present; cron recovery
+# remains available during staged rollout:
+#   WORKER_BASE_URL   - this Worker's public HTTPS origin, e.g.
+#                       https://worker.example.com . Preferred for new
+#                       provisioning: one origin, and the runtime derives and
+#                       reports the exact /v1/wake URL at handshake time.
+#   WAKE_CALLBACK_URL - legacy full URL ending in /v1/wake. Used only when
+#                       WORKER_BASE_URL is absent or blank; an invalid
+#                       WORKER_BASE_URL fails closed instead of falling back.
+
+# Persist correlated registration diagnostics in Cloudflare Workers Logs.
+[observability]
+enabled = true
+head_sampling_rate = 1
